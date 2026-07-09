@@ -18,9 +18,11 @@ jobs:
         java: ['17', '21']
     steps:
       - uses: actions/checkout@v4
-      - run: git clone --depth 1 https://github.com/kotoba-lang/gpu.git ../gpu
-      - run: git clone --depth 1 https://github.com/kotoba-lang/sprite-gpu.git ../sprite-gpu
-      - run: git clone --depth 1 https://github.com/kotoba-lang/wgsl.git ../wgsl
+      # kotoba.webgl re-exports kami.webgl (kotoba-lang/webgpu) — see CHANGELOG.md — so the
+      # sibling checkout is webgpu (+ its own transitive local/root deps) instead of the old
+      # direct gpu/sprite-gpu/wgsl siblings.
+      - run: git clone --depth 1 https://github.com/kotoba-lang/webgpu.git ../webgpu
+      - run: git clone --depth 1 https://github.com/kotoba-lang/org-w3-webgpu.git ../org-w3-webgpu
       - run: git clone --depth 1 https://github.com/kotoba-lang/expr.git ../expr
       - uses: actions/setup-java@v4
         with:
