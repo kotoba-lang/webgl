@@ -62,6 +62,63 @@
       (throw (ex-info (str "GLSL link error:\n" (.getProgramInfoLog gl p)) {})))
     p))
 
+;; ── arbitrary indexed 3D mesh fallback ──────────────────────────────────────
+(def ^:private mesh-vertex-shader
+  "#version 300 es
+precision highp float;
+layout(location=0) in vec3 a_position;
+layout(location=1) in vec3 a_normal;
+uniform mat4 u_mvp;
+out vec3 v_normal;
+void main(){ gl_Position=u_mvp*vec4(a_position,1.0); v_normal=a_normal; }")
+(def ^:private mesh-fragment-shader
+  "#version 300 es
+precision highp float;
+in vec3 v_normal;
+uniform vec3 u_color;
+out vec4 out_color;
+void main(){ float l=0.25+0.75*max(dot(normalize(v_normal),normalize(vec3(0.4,0.8,0.6))),0.0); out_color=vec4(u_color*l,1.0); }")
+
+(defn init-mesh-viewport!
+  "Initialize the canonical arbitrary-mesh WebGL2 fallback for a canvas."
+  [canvas]
+  (when-let [gl (webgl2-context canvas)]
+    (let [width (max 1 (.-clientWidth canvas)) height (max 1 (.-clientHeight canvas))
+          prog (program gl mesh-vertex-shader mesh-fragment-shader)]
+      (set! (.-width canvas) width) (set! (.-height canvas) height)
+      (.enable gl (.-DEPTH_TEST gl))
+      {:backend :webgl2 :gl gl :program prog :width width :height height})))
+
+(defn upload-mesh!
+  "Upload {:positions :normals :indices} to a fallback viewport."
+  [{:keys [gl]} {:keys [positions normals indices]}]
+  (let [vao (.createVertexArray gl) vertex-buffer (.createBuffer gl) index-buffer (.createBuffer gl)
+        vertices (js/Float32Array. (clj->js (mapcat concat (map vector positions normals))))
+        index-data (js/Uint32Array. (clj->js indices))]
+    (.bindVertexArray gl vao)
+    (.bindBuffer gl (.-ARRAY_BUFFER gl) vertex-buffer)
+    (.bufferData gl (.-ARRAY_BUFFER gl) vertices (.-STATIC_DRAW gl))
+    (doseq [[location offset] [[0 0] [1 12]]]
+      (.enableVertexAttribArray gl location)
+      (.vertexAttribPointer gl location 3 (.-FLOAT gl) false 24 offset))
+    (.bindBuffer gl (.-ELEMENT_ARRAY_BUFFER gl) index-buffer)
+    (.bufferData gl (.-ELEMENT_ARRAY_BUFFER gl) index-data (.-STATIC_DRAW gl))
+    (.bindVertexArray gl nil)
+    {:vao vao :vertex-buffer vertex-buffer :index-buffer index-buffer :index-count (count indices)}))
+
+(defn render-mesh-frame!
+  "Render one fallback mesh frame. MVP is a column-major Float32Array."
+  [{:keys [gl program width height]} {:keys [vao index-count]} mvp [r g b]]
+  (.viewport gl 0 0 width height)
+  (.clearColor gl 0.035 0.055 0.10 1.0)
+  (.clear gl (bit-or (.-COLOR_BUFFER_BIT gl) (.-DEPTH_BUFFER_BIT gl)))
+  (.useProgram gl program)
+  (.uniformMatrix4fv gl (.getUniformLocation gl program "u_mvp") false mvp)
+  (.uniform3f gl (.getUniformLocation gl program "u_color") r g b)
+  (.bindVertexArray gl vao)
+  (.drawElements gl (.-TRIANGLES gl) index-count (.-UNSIGNED_INT gl) 0)
+  (.bindVertexArray gl nil))
+
 ;; ── 2D sprite pass: instanced SDF quads (the GPU-2D path, identical output to WebGPU) ───────────
 ;; instance layout = kami.sprite-gpu/pack-instances: 12 floats — ipos(2) isize(2) irot(1) ishape(1)
 ;; icolor(4) pad(2); 48-byte stride. Quad corners come from gl_VertexID (6 verts), no corner buffer.
@@ -234,6 +291,9 @@
 
      (defn webgl2-context [canvas] (browser-only "webgl2-context" {:canvas canvas}))
      (defn program [gl vsrc fsrc] (browser-only "program" {:gl gl :vert vsrc :frag fsrc}))
+     (defn init-mesh-viewport! [canvas] (browser-only "init-mesh-viewport!" {:canvas canvas}))
+     (defn upload-mesh! [& args] (browser-only "upload-mesh!" {:args args}))
+     (defn render-mesh-frame! [& args] (browser-only "render-mesh-frame!" {:args args}))
      (defn sprite-renderer [& args] (browser-only "sprite-renderer" {:args args}))
      (defn render-2d! [& args] (browser-only "render-2d!" {:args args}))
      (defn scene-renderer [& args] (browser-only "scene-renderer" {:args args}))
