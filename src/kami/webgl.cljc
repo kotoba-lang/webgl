@@ -106,18 +106,26 @@ void main(){ float l=0.25+0.75*max(dot(normalize(v_normal),normalize(vec3(0.4,0.
     (.bindVertexArray gl nil)
     {:vao vao :vertex-buffer vertex-buffer :index-buffer index-buffer :index-count (count indices)}))
 
-(defn render-mesh-frame!
-  "Render one fallback mesh frame. MVP is a column-major Float32Array."
-  [{:keys [gl program width height]} {:keys [vao index-count]} mvp [r g b]]
+(defn render-mesh-scene!
+  "Render several fallback mesh draws after one color/depth clear. Each draw
+  is {:buffers :mvp :color}; MVP is a column-major Float32Array."
+  [{:keys [gl program width height]} draws]
   (.viewport gl 0 0 width height)
   (.clearColor gl 0.035 0.055 0.10 1.0)
   (.clear gl (bit-or (.-COLOR_BUFFER_BIT gl) (.-DEPTH_BUFFER_BIT gl)))
   (.useProgram gl program)
-  (.uniformMatrix4fv gl (.getUniformLocation gl program "u_mvp") false mvp)
-  (.uniform3f gl (.getUniformLocation gl program "u_color") r g b)
-  (.bindVertexArray gl vao)
-  (.drawElements gl (.-TRIANGLES gl) index-count (.-UNSIGNED_INT gl) 0)
+  (doseq [{:keys [buffers mvp color]} draws]
+    (let [{:keys [vao index-count]} buffers [r g b] color]
+      (.uniformMatrix4fv gl (.getUniformLocation gl program "u_mvp") false mvp)
+      (.uniform3f gl (.getUniformLocation gl program "u_color") r g b)
+      (.bindVertexArray gl vao)
+      (.drawElements gl (.-TRIANGLES gl) index-count (.-UNSIGNED_INT gl) 0)))
   (.bindVertexArray gl nil))
+
+(defn render-mesh-frame!
+  "Render one fallback mesh frame."
+  [viewport buffers mvp color]
+  (render-mesh-scene! viewport [{:buffers buffers :mvp mvp :color color}]))
 
 ;; ── 2D sprite pass: instanced SDF quads (the GPU-2D path, identical output to WebGPU) ───────────
 ;; instance layout = kami.sprite-gpu/pack-instances: 12 floats — ipos(2) isize(2) irot(1) ishape(1)
@@ -293,6 +301,7 @@ void main(){ float l=0.25+0.75*max(dot(normalize(v_normal),normalize(vec3(0.4,0.
      (defn program [gl vsrc fsrc] (browser-only "program" {:gl gl :vert vsrc :frag fsrc}))
      (defn init-mesh-viewport! [canvas] (browser-only "init-mesh-viewport!" {:canvas canvas}))
      (defn upload-mesh! [& args] (browser-only "upload-mesh!" {:args args}))
+     (defn render-mesh-scene! [& args] (browser-only "render-mesh-scene!" {:args args}))
      (defn render-mesh-frame! [& args] (browser-only "render-mesh-frame!" {:args args}))
      (defn sprite-renderer [& args] (browser-only "sprite-renderer" {:args args}))
      (defn render-2d! [& args] (browser-only "render-2d!" {:args args}))
