@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout local-root dependency graph
         run: |
-          for repo in webgpu org-w3-webgpu wgsl expr sprite-gpu sprite2d sky shaders render-shaders scene2d gpu dance physics fsm netsync pipelines level host playwright cartpole-math; do
+          for repo in webgpu org-w3-webgpu wgsl expr sprite-gpu sprite2d sky shaders render-shaders scene2d gpu dance physics fsm netsync pipelines level host playwright cartpole-math kami-engine-sdk; do
             git clone --depth 1 "https://github.com/kotoba-lang/${repo}.git" "../${repo}"
           done
       - uses: actions/setup-java@v4
