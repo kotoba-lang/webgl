@@ -92,7 +92,7 @@ void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6))
 
 (defn upload-mesh!
   "Upload {:positions :normals :indices} to a fallback viewport."
-  [{:keys [gl]} {:keys [positions normals indices]}]
+  [{:keys [gl]} {:keys [positions normals indices joints weights] :as geometry}]
   (let [vao (.createVertexArray gl) vertex-buffer (.createBuffer gl) index-buffer (.createBuffer gl)
         vertices (js/Float32Array. (clj->js (mapcat concat (map vector positions normals))))
         index-data (js/Uint32Array. (clj->js indices))]
@@ -105,7 +105,8 @@ void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6))
     (.bindBuffer gl (.-ELEMENT_ARRAY_BUFFER gl) index-buffer)
     (.bufferData gl (.-ELEMENT_ARRAY_BUFFER gl) index-data (.-STATIC_DRAW gl))
     (.bindVertexArray gl nil)
-    {:vao vao :vertex-buffer vertex-buffer :index-buffer index-buffer :index-count (count indices)}))
+    {:vao vao :vertex-buffer vertex-buffer :index-buffer index-buffer :index-count (count indices)
+     :geometry geometry :positions positions :normals normals :joints joints :weights weights}))
 
 (defn render-mesh-scene!
   "Render several fallback mesh draws after one color/depth clear. Each draw
@@ -129,6 +130,27 @@ void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6))
   "Render one fallback mesh frame."
   [viewport buffers mvp color]
   (render-mesh-scene! viewport [{:buffers buffers :mvp mvp :color color}]))
+
+(defn- transform-joint [matrix [x y z] direction?]
+  [(+ (* (nth matrix 0) x) (* (nth matrix 4) y) (* (nth matrix 8) z) (if direction? 0 (nth matrix 12)))
+   (+ (* (nth matrix 1) x) (* (nth matrix 5) y) (* (nth matrix 9) z) (if direction? 0 (nth matrix 13)))
+   (+ (* (nth matrix 2) x) (* (nth matrix 6) y) (* (nth matrix 10) z) (if direction? 0 (nth matrix 14)))])
+
+(defn render-skinned-mesh-frame!
+  "WebGL2 compatibility skinning. Updates the existing vertex buffer from
+  immutable source geometry, then uses the canonical mesh scene renderer."
+  [{:keys [gl] :as viewport} {:keys [positions normals joints weights vertex-buffer] :as buffers}
+   mvp color joint-matrices]
+  (let [skin (fn [value joint-ids joint-weights direction?]
+               (reduce (fn [result [joint weight]]
+                         (mapv + result (mapv #(* weight %) (transform-joint (nth joint-matrices joint) value direction?))))
+                       [0 0 0] (map vector joint-ids joint-weights)))
+        skinned-positions (mapv skin positions joints weights (repeat false))
+        skinned-normals (mapv skin normals joints weights (repeat true))
+        vertices (js/Float32Array. (clj->js (mapcat concat (map vector skinned-positions skinned-normals))))]
+    (.bindBuffer gl (.-ARRAY_BUFFER gl) vertex-buffer)
+    (.bufferSubData gl (.-ARRAY_BUFFER gl) 0 vertices)
+    (render-mesh-scene! viewport [{:buffers buffers :mvp mvp :color color}])))
 
 ;; ── 2D sprite pass: instanced SDF quads (the GPU-2D path, identical output to WebGPU) ───────────
 ;; instance layout = kami.sprite-gpu/pack-instances: 12 floats — ipos(2) isize(2) irot(1) ishape(1)
@@ -306,6 +328,7 @@ void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6))
      (defn upload-mesh! [& args] (browser-only "upload-mesh!" {:args args}))
      (defn render-mesh-scene! [& args] (browser-only "render-mesh-scene!" {:args args}))
      (defn render-mesh-frame! [& args] (browser-only "render-mesh-frame!" {:args args}))
+     (defn render-skinned-mesh-frame! [& args] (browser-only "render-skinned-mesh-frame!" {:args args}))
      (defn sprite-renderer [& args] (browser-only "sprite-renderer" {:args args}))
      (defn render-2d! [& args] (browser-only "render-2d!" {:args args}))
      (defn scene-renderer [& args] (browser-only "scene-renderer" {:args args}))
