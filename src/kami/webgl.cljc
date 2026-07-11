@@ -76,8 +76,9 @@ void main(){ gl_Position=u_mvp*vec4(a_position,1.0); v_normal=a_normal; }")
 precision highp float;
 in vec3 v_normal;
 uniform vec3 u_color;
+uniform vec2 u_material;
 out vec4 out_color;
-void main(){ float l=0.25+0.75*max(dot(normalize(v_normal),normalize(vec3(0.4,0.8,0.6))),0.0); out_color=vec4(u_color*l,1.0); }")
+void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6)); float ndl=max(dot(n,light),0.0); float l=0.25+0.75*ndl; float metallic=clamp(u_material.x,0.0,1.0); float roughness=clamp(u_material.y,0.04,1.0); vec3 h=normalize(light+vec3(0.0,0.0,1.0)); float spec=pow(max(dot(n,h),0.0),mix(128.0,2.0,roughness))*ndl; vec3 f0=mix(vec3(0.04),u_color,metallic); out_color=vec4(u_color*l*(1.0-metallic*0.45)+f0*spec,1.0); }")
 
 (defn init-mesh-viewport!
   "Initialize the canonical arbitrary-mesh WebGL2 fallback for a canvas."
@@ -114,10 +115,12 @@ void main(){ float l=0.25+0.75*max(dot(normalize(v_normal),normalize(vec3(0.4,0.
   (.clearColor gl 0.035 0.055 0.10 1.0)
   (.clear gl (bit-or (.-COLOR_BUFFER_BIT gl) (.-DEPTH_BUFFER_BIT gl)))
   (.useProgram gl program)
-  (doseq [{:keys [buffers mvp color]} draws]
-    (let [{:keys [vao index-count]} buffers [r g b] color]
+  (doseq [{:keys [buffers mvp color material]} draws]
+    (let [{:keys [vao index-count]} buffers [r g b] color
+          {:keys [metallic roughness] :or {metallic 0.0 roughness 0.5}} material]
       (.uniformMatrix4fv gl (.getUniformLocation gl program "u_mvp") false mvp)
       (.uniform3f gl (.getUniformLocation gl program "u_color") r g b)
+      (.uniform2f gl (.getUniformLocation gl program "u_material") metallic roughness)
       (.bindVertexArray gl vao)
       (.drawElements gl (.-TRIANGLES gl) index-count (.-UNSIGNED_INT gl) 0)))
   (.bindVertexArray gl nil))
