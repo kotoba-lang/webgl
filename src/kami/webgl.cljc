@@ -25,9 +25,18 @@
 (defn webgpu-available? [] (boolean (and js/navigator (.-gpu js/navigator))))
 
 (defn webgl2-context
-  "A WebGL2 rendering context for the canvas (premultiplied alpha, antialias), or nil."
+  "A WebGL2 rendering context for the canvas (premultiplied alpha, antialias), or nil.
+   `preserveDrawingBuffer: true` -- without it, the browser is free to clear/invalidate
+   the drawing buffer for compositor efficiency between frames, so ANY out-of-band read
+   of the canvas (readPixels/toDataURL/a screenshot call from outside the same
+   requestAnimationFrame that drew it -- exactly how net-babiniku round 66/US-129's own
+   verification and this repo's own render-test/webgl-test playwright checks both work)
+   can legitimately read a post-invalidate empty buffer even when the content rendered
+   correctly on-screen during actual compositing. Found investigating net-babiniku's
+   round 66/67 kaizen: readPixels showed [0,0,0,0] everywhere on this fallback's
+   placeholder-box canvas, which this flag's absence fully explains."
   [canvas]
-  (.getContext canvas "webgl2" #js {:antialias true :premultipliedAlpha true}))
+  (.getContext canvas "webgl2" #js {:antialias true :premultipliedAlpha true :preserveDrawingBuffer true}))
 
 (defn pick-backend
   "The best available GPU backend for this browser: :webgpu if WebGPU is present, else :webgl2.
@@ -93,7 +102,27 @@ void main(){ float l=0.25+0.75*max(dot(normalize(v_normal),normalize(vec3(0.4,0.
   "Upload {:positions :normals :indices} to a fallback viewport."
   [{:keys [gl]} {:keys [positions normals indices]}]
   (let [vao (.createVertexArray gl) vertex-buffer (.createBuffer gl) index-buffer (.createBuffer gl)
-        vertices (js/Float32Array. (clj->js (mapcat concat (map vector positions normals))))
+        ;; Kaizen (net-babiniku co-scientist round 67): `(mapcat concat (map vector
+        ;; positions normals))` does NOT flatten to raw floats -- `map vector` first
+        ;; pairs each [x y z] position with its [nx ny nz] normal into a single 2-element
+        ;; vector [pos-triple norm-triple], then `mapcat concat` over THAT one-collection
+        ;; seq calls `concat` with ONE argument per element (`(concat [pos-triple
+        ;; norm-triple])`), which just returns the pair's own two elements unflattened --
+        ;; the inner 3-element triples are never broken down to individual numbers. The
+        ;; result was a JS array of alternating 3-element arrays, not 6 flat floats per
+        ;; vertex; `js/Float32Array.`'s constructor coerces each nested array via
+        ;; `Number([...])`, which is NaN for any array that isn't exactly 1 element long
+        ;; -- so EVERY vertex in EVERY WebGL2-fallback mesh has silently been an all-NaN
+        ;; degenerate point since this function was written, making the WebGL2 fallback's
+        ;; entire 3D mesh path (net-babiniku's placeholder box, round 66/US-129) render
+        ;; nothing. `(mapcat concat positions normals)` -- WITHOUT the `map vector` step
+        ;; -- uses mapcat's own multi-collection form, which maps `concat` over PARALLEL
+        ;; elements from both collections directly: `(concat pos-triple norm-triple)`
+        ;; (two args) genuinely concatenates into one flat 6-element seq per vertex, and
+        ;; mapcat flattens across all vertices. Verified with a minimal repro: the old
+        ;; form on [[1 2 3]] positions / [[7 8 9]] normals yields `([1 2 3] [7 8 9])`
+        ;; (unflattened); the fixed form yields `(1 2 3 7 8 9)` (flat).
+        vertices (js/Float32Array. (clj->js (mapcat concat positions normals)))
         index-data (js/Uint32Array. (clj->js indices))]
     (.bindVertexArray gl vao)
     (.bindBuffer gl (.-ARRAY_BUFFER gl) vertex-buffer)
