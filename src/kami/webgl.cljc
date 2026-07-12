@@ -68,32 +68,40 @@
 precision highp float;
 layout(location=0) in vec3 a_position;
 layout(location=1) in vec3 a_normal;
-uniform mat4 u_mvp;
+layout(location=2) in vec4 a_mvp0;
+layout(location=3) in vec4 a_mvp1;
+layout(location=4) in vec4 a_mvp2;
+layout(location=5) in vec4 a_mvp3;
+layout(location=6) in vec4 a_color;
 out vec3 v_normal;
-void main(){ gl_Position=u_mvp*vec4(a_position,1.0); v_normal=a_normal; }")
+out vec3 v_color;
+void main(){ mat4 mvp=mat4(a_mvp0,a_mvp1,a_mvp2,a_mvp3); gl_Position=mvp*vec4(a_position,1.0); v_normal=a_normal; v_color=a_color.rgb; }")
 (def ^:private mesh-fragment-shader
   "#version 300 es
 precision highp float;
 in vec3 v_normal;
-uniform vec3 u_color;
+in vec3 v_color;
 uniform vec2 u_material;
 out vec4 out_color;
-void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6)); float ndl=max(dot(n,light),0.0); float l=0.25+0.75*ndl; float metallic=clamp(u_material.x,0.0,1.0); float roughness=clamp(u_material.y,0.04,1.0); vec3 h=normalize(light+vec3(0.0,0.0,1.0)); float spec=pow(max(dot(n,h),0.0),mix(128.0,2.0,roughness))*ndl; vec3 f0=mix(vec3(0.04),u_color,metallic); out_color=vec4(u_color*l*(1.0-metallic*0.45)+f0*spec,1.0); }")
+void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6)); float ndl=max(dot(n,light),0.0); float l=0.25+0.75*ndl; float metallic=clamp(u_material.x,0.0,1.0); float roughness=clamp(u_material.y,0.04,1.0); vec3 h=normalize(light+vec3(0.0,0.0,1.0)); float spec=pow(max(dot(n,h),0.0),mix(128.0,2.0,roughness))*ndl; vec3 f0=mix(vec3(0.04),v_color,metallic); out_color=vec4(v_color*l*(1.0-metallic*0.45)+f0*spec,1.0); }")
 
 (defn init-mesh-viewport!
   "Initialize the canonical arbitrary-mesh WebGL2 fallback for a canvas."
   [canvas]
   (when-let [gl (webgl2-context canvas)]
     (let [width (max 1 (.-clientWidth canvas)) height (max 1 (.-clientHeight canvas))
-          prog (program gl mesh-vertex-shader mesh-fragment-shader)]
+          prog (program gl mesh-vertex-shader mesh-fragment-shader)
+          instance-buffer (.createBuffer gl)]
       (set! (.-width canvas) width) (set! (.-height canvas) height)
       (.enable gl (.-DEPTH_TEST gl))
-      {:backend :webgl2 :gl gl :program prog :width width :height height})))
+      {:backend :webgl2 :gl gl :program prog :instance-buffer instance-buffer
+       :width width :height height})))
 
 (defn upload-mesh!
   "Upload {:positions :normals :indices} to a fallback viewport."
   [{:keys [gl]} {:keys [positions normals indices joints weights] :as geometry}]
   (let [vao (.createVertexArray gl) vertex-buffer (.createBuffer gl) index-buffer (.createBuffer gl)
+        instance-buffer (.createBuffer gl)
         vertices (js/Float32Array. (clj->js (mapcat concat (map vector positions normals))))
         index-data (js/Uint32Array. (clj->js indices))]
     (.bindVertexArray gl vao)
@@ -104,26 +112,38 @@ void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6))
       (.vertexAttribPointer gl location 3 (.-FLOAT gl) false 24 offset))
     (.bindBuffer gl (.-ELEMENT_ARRAY_BUFFER gl) index-buffer)
     (.bufferData gl (.-ELEMENT_ARRAY_BUFFER gl) index-data (.-STATIC_DRAW gl))
+    (.bindBuffer gl (.-ARRAY_BUFFER gl) instance-buffer)
+    (doseq [[location size offset] [[2 4 0] [3 4 16] [4 4 32] [5 4 48] [6 4 64]]]
+      (.enableVertexAttribArray gl location)
+      (.vertexAttribPointer gl location size (.-FLOAT gl) false 80 offset)
+      (.vertexAttribDivisor gl location 1))
     (.bindVertexArray gl nil)
-    {:vao vao :vertex-buffer vertex-buffer :index-buffer index-buffer :index-count (count indices)
+    {:vao vao :vertex-buffer vertex-buffer :index-buffer index-buffer :instance-buffer instance-buffer
+     :instance-cache (atom nil) :index-count (count indices)
      :geometry geometry :positions positions :normals normals :joints joints :weights weights}))
 
 (defn render-mesh-scene!
-  "Render several fallback mesh draws after one color/depth clear. Each draw
-  is {:buffers :mvp :color}; MVP is a column-major Float32Array."
+  "Render fallback meshes with one instanced call per shared geometry. Each
+  draw is {:buffers :mvp :color}; MVP is a column-major Float32Array."
   [{:keys [gl program width height]} draws]
   (.viewport gl 0 0 width height)
   (.clearColor gl 0.035 0.055 0.10 1.0)
   (.clear gl (bit-or (.-COLOR_BUFFER_BIT gl) (.-DEPTH_BUFFER_BIT gl)))
   (.useProgram gl program)
-  (doseq [{:keys [buffers mvp color material]} draws]
-    (let [{:keys [vao index-count]} buffers [r g b] color
-          {:keys [metallic roughness] :or {metallic 0.0 roughness 0.5}} material]
-      (.uniformMatrix4fv gl (.getUniformLocation gl program "u_mvp") false mvp)
-      (.uniform3f gl (.getUniformLocation gl program "u_color") r g b)
-      (.uniform2f gl (.getUniformLocation gl program "u_material") metallic roughness)
+  (.uniform2f gl (.getUniformLocation gl program "u_material") 0.0 0.5)
+  (doseq [[_ group] (group-by :buffers draws)]
+    (let [{:keys [buffers]} (first group) {:keys [vao index-count instance-buffer instance-cache]} buffers
+          cached @instance-cache
+          cache-hit? (= group (:draws cached))
+          packed (if cache-hit? (:packed cached)
+                   (js/Float32Array.
+                    (clj->js (mapcat (fn [{:keys [mvp color]}]
+                                       (concat (array-seq mvp) color [1.0])) group))))]
+      (when-not cache-hit? (reset! instance-cache {:draws group :packed packed}))
+      (.bindBuffer gl (.-ARRAY_BUFFER gl) instance-buffer)
+      (when-not cache-hit? (.bufferData gl (.-ARRAY_BUFFER gl) packed (.-DYNAMIC_DRAW gl)))
       (.bindVertexArray gl vao)
-      (.drawElements gl (.-TRIANGLES gl) index-count (.-UNSIGNED_INT gl) 0)))
+      (.drawElementsInstanced gl (.-TRIANGLES gl) index-count (.-UNSIGNED_INT gl) 0 (count group))))
   (.bindVertexArray gl nil))
 
 (defn render-mesh-frame!
