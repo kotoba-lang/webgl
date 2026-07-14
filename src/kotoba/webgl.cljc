@@ -14,3 +14,7 @@
 (def render-2d!         impl/render-2d!)
 (def scene-renderer     impl/scene-renderer)
 (def lit-renderer       impl/lit-renderer)
+(def init-mesh-viewport! impl/init-mesh-viewport!)
+(def upload-mesh!        impl/upload-mesh!)
+(def render-mesh-scene!  impl/render-mesh-scene!)
+(def render-mesh-frame!  impl/render-mesh-frame!)
