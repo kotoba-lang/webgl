@@ -19,3 +19,4 @@
 (def render-mesh-scene!  impl/render-mesh-scene!)
 (def render-mesh-frame!  impl/render-mesh-frame!)
 (def render-skinned-mesh-frame! impl/render-skinned-mesh-frame!)
+(def skin-vector impl/skin-vector)
