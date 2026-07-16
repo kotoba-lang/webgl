@@ -7,9 +7,50 @@
    The naga GLSL convention this binds to: per-instance vertex inputs at `layout(location=0..)`,
    uniforms in a std140 block, the full-quad corners from gl_VertexID. So `(pick-backend)` selects
    WebGPU when navigator.gpu exists and falls back here otherwise — one EDN, two GPU runtimes."
-  (:require [kami.gpu :as gpu]
+  (:require [kotoba.gpu :as gpu]
             [kami.sprite-gpu :as sg]
             [kami.webgl.glsl :as glsl]))
+
+(defn- length3 [[x y z]]
+  (#?(:clj Math/sqrt :cljs js/Math.sqrt) (+ (* x x) (* y y) (* z z))))
+
+(defn- normalize3 [value fallback]
+  (let [magnitude (length3 value)]
+    (if (> magnitude 1.0e-12)
+      (mapv #(/ % magnitude) value)
+      fallback)))
+
+(defn- transform-joint [matrix [x y z] direction?]
+  [(+ (* (nth matrix 0) x) (* (nth matrix 4) y) (* (nth matrix 8) z)
+      (if direction? 0 (nth matrix 12)))
+   (+ (* (nth matrix 1) x) (* (nth matrix 5) y) (* (nth matrix 9) z)
+      (if direction? 0 (nth matrix 13)))
+   (+ (* (nth matrix 2) x) (* (nth matrix 6) y) (* (nth matrix 10) z)
+      (if direction? 0 (nth matrix 14)))])
+
+(defn skin-vector
+  "Blend one position or normal through a joint palette. Positive weights are
+  normalized at the boundary; an empty/zero palette preserves bind-pose data.
+  Direction vectors are normalized again after blending."
+  [value joint-ids weights joint-matrices direction?]
+  (let [influences (keep (fn [[joint weight]]
+                           (when (and (integer? joint)
+                                      (<= 0 joint) (< joint (count joint-matrices))
+                                      (number? weight) (pos? weight))
+                             [joint weight]))
+                         (map vector joint-ids weights))
+        total (reduce + 0 (map second influences))]
+    (if-not (pos? total)
+      (if direction? (normalize3 value value) value)
+      (let [blended
+            (reduce (fn [result [joint weight]]
+                      (mapv + result
+                            (mapv #(* (/ weight total) %)
+                                  (transform-joint (nth joint-matrices joint)
+                                                   value direction?))))
+                    [0 0 0]
+                    influences)]
+        (if direction? (normalize3 blended (normalize3 value value)) blended)))))
 
 ;; `.cljc`: the CLJS branch is the real browser WebGL2 executor; the CLJ branch is a JVM-safe stand-
 ;; in (ported from kotoba-lang/webgl's `kotoba.webgl`, ADR/CHANGELOG.md — that repo's copy carried
@@ -99,8 +140,9 @@ void main(){ float l=0.25+0.75*max(dot(normalize(v_normal),normalize(vec3(0.4,0.
       {:backend :webgl2 :gl gl :program prog :width width :height height})))
 
 (defn upload-mesh!
-  "Upload {:positions :normals :indices} to a fallback viewport."
-  [{:keys [gl]} {:keys [positions normals indices]}]
+  "Upload mesh geometry to a fallback viewport.  Source skinning attributes are
+  retained so the compatibility renderer can update the interleaved vertex buffer."
+  [{:keys [gl]} {:keys [positions normals indices joints weights] :as geometry}]
   (let [vao (.createVertexArray gl) vertex-buffer (.createBuffer gl) index-buffer (.createBuffer gl)
         ;; Kaizen (net-babiniku co-scientist round 67): `(mapcat concat (map vector
         ;; positions normals))` does NOT flatten to raw floats -- `map vector` first
@@ -133,7 +175,8 @@ void main(){ float l=0.25+0.75*max(dot(normalize(v_normal),normalize(vec3(0.4,0.
     (.bindBuffer gl (.-ELEMENT_ARRAY_BUFFER gl) index-buffer)
     (.bufferData gl (.-ELEMENT_ARRAY_BUFFER gl) index-data (.-STATIC_DRAW gl))
     (.bindVertexArray gl nil)
-    {:vao vao :vertex-buffer vertex-buffer :index-buffer index-buffer :index-count (count indices)}))
+    {:vao vao :vertex-buffer vertex-buffer :index-buffer index-buffer :index-count (count indices)
+     :geometry geometry :positions positions :normals normals :joints joints :weights weights}))
 
 (defn render-mesh-scene!
   "Render several fallback mesh draws after one color/depth clear. Each draw
@@ -155,6 +198,22 @@ void main(){ float l=0.25+0.75*max(dot(normalize(v_normal),normalize(vec3(0.4,0.
   "Render one fallback mesh frame."
   [viewport buffers mvp color]
   (render-mesh-scene! viewport [{:buffers buffers :mvp mvp :color color}]))
+
+(defn render-skinned-mesh-frame!
+  "CPU-skin a mesh for the WebGL2 compatibility path, update its existing
+  vertex buffer, and render it through the canonical mesh scene renderer."
+  [{:keys [gl] :as viewport}
+   {:keys [positions normals joints weights vertex-buffer] :as buffers}
+   mvp color joint-matrices]
+  (let [skinned-positions (mapv #(skin-vector %1 %2 %3 joint-matrices false)
+                                positions joints weights)
+        skinned-normals (mapv #(skin-vector %1 %2 %3 joint-matrices true)
+                              normals joints weights)
+        vertices (js/Float32Array.
+                  (clj->js (mapcat concat (map vector skinned-positions skinned-normals))))]
+    (.bindBuffer gl (.-ARRAY_BUFFER gl) vertex-buffer)
+    (.bufferSubData gl (.-ARRAY_BUFFER gl) 0 vertices)
+    (render-mesh-scene! viewport [{:buffers buffers :mvp mvp :color color}])))
 
 ;; ── 2D sprite pass: instanced SDF quads (the GPU-2D path, identical output to WebGPU) ───────────
 ;; instance layout = kami.sprite-gpu/pack-instances: 12 floats — ipos(2) isize(2) irot(1) ishape(1)
@@ -332,6 +391,8 @@ void main(){ float l=0.25+0.75*max(dot(normalize(v_normal),normalize(vec3(0.4,0.
      (defn upload-mesh! [& args] (browser-only "upload-mesh!" {:args args}))
      (defn render-mesh-scene! [& args] (browser-only "render-mesh-scene!" {:args args}))
      (defn render-mesh-frame! [& args] (browser-only "render-mesh-frame!" {:args args}))
+     (defn render-skinned-mesh-frame! [& args]
+       (browser-only "render-skinned-mesh-frame!" {:args args}))
      (defn sprite-renderer [& args] (browser-only "sprite-renderer" {:args args}))
      (defn render-2d! [& args] (browser-only "render-2d!" {:args args}))
      (defn scene-renderer [& args] (browser-only "scene-renderer" {:args args}))

@@ -14,4 +14,23 @@
                         (webgl/webgl2-context nil)))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo
                         #"browser ClojureScript WebGL2 executor"
-                        (webgl/scene-renderer nil))))
+                        (webgl/scene-renderer nil)))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                        #"browser ClojureScript WebGL2 executor"
+                        (webgl/render-skinned-mesh-frame!))))
+
+(def identity-matrix
+  [1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1])
+
+(deftest fallback-skinning-normalizes-and-preserves-bind-pose
+  (let [translated (assoc identity-matrix 12 4)
+        palette [identity-matrix translated]]
+    (is (= [4 2 3]
+           (webgl/skin-vector [1 2 3] [0 1] [1 3] palette false))
+        "unnormalized weights are normalized before blending")
+    (is (= [1 2 3]
+           (webgl/skin-vector [1 2 3] [0 1] [0 0] palette false))
+        "zero weights preserve the bind-pose position")
+    (is (= [0.0 1.0 0.0]
+           (webgl/skin-vector [0 2 0] [0] [2] palette true))
+        "blended normals are unit length")))
