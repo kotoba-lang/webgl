@@ -14,4 +14,7 @@
                         (webgl/webgl2-context nil)))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo
                         #"browser ClojureScript WebGL2 executor"
-                        (webgl/scene-renderer nil))))
+                        (webgl/scene-renderer nil)))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                        #"browser ClojureScript WebGL2 executor"
+                        (webgl/render-skinned-mesh-frame!))))
