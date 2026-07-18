@@ -11,6 +11,14 @@
             [kami.sprite-gpu :as sg]
             [kami.webgl.glsl :as glsl]))
 
+(defn interleave-mesh-vertices
+  "Flatten parallel position/normal/UV vectors to the canonical p3+n3+uv2
+  scalar stream used by both upload and CPU-skin updates."
+  [positions normals uvs]
+  (vec (mapcat (fn [position normal uv]
+                 (concat position normal uv))
+               positions normals uvs)))
+
 ;; `.cljc`: the CLJS branch is the real browser WebGL2 executor; the CLJ branch is a JVM-safe stand-
 ;; in (ported from kotoba-lang/webgl's `kotoba.webgl`, ADR/CHANGELOG.md — that repo's copy carried
 ;; this platform split, kami.webgl.cljs here didn't, so this repo silently regressed portability
@@ -68,22 +76,29 @@
 precision highp float;
 layout(location=0) in vec3 a_position;
 layout(location=1) in vec3 a_normal;
+layout(location=7) in vec2 a_uv;
 layout(location=2) in vec4 a_mvp0;
 layout(location=3) in vec4 a_mvp1;
 layout(location=4) in vec4 a_mvp2;
 layout(location=5) in vec4 a_mvp3;
 layout(location=6) in vec4 a_color;
+uniform vec2 u_uv_offset;
+uniform vec2 u_uv_scale;
 out vec3 v_normal;
 out vec3 v_color;
-void main(){ mat4 mvp=mat4(a_mvp0,a_mvp1,a_mvp2,a_mvp3); gl_Position=mvp*vec4(a_position,1.0); v_normal=a_normal; v_color=a_color.rgb; }")
+out vec2 v_uv;
+void main(){ mat4 mvp=mat4(a_mvp0,a_mvp1,a_mvp2,a_mvp3); gl_Position=mvp*vec4(a_position,1.0); v_normal=a_normal; v_color=a_color.rgb; v_uv=a_uv*u_uv_scale+u_uv_offset; }")
 (def ^:private mesh-fragment-shader
   "#version 300 es
 precision highp float;
 in vec3 v_normal;
 in vec3 v_color;
+in vec2 v_uv;
 uniform vec2 u_material;
+uniform vec3 u_shading;
+uniform sampler2D u_base_color;
 out vec4 out_color;
-void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6)); float ndl=max(dot(n,light),0.0); float l=0.25+0.75*ndl; float metallic=clamp(u_material.x,0.0,1.0); float roughness=clamp(u_material.y,0.04,1.0); vec3 h=normalize(light+vec3(0.0,0.0,1.0)); float spec=pow(max(dot(n,h),0.0),mix(128.0,2.0,roughness))*ndl; vec3 f0=mix(vec3(0.04),v_color,metallic); out_color=vec4(v_color*l*(1.0-metallic*0.45)+f0*spec,1.0); }")
+void main(){ vec4 base=texture(u_base_color,v_uv)*vec4(v_color,1.0); vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6)); float ndl=max(dot(n,light),0.0); float smooth_w=max(u_shading.z,0.0001); float toon_edge=smoothstep(u_shading.y-smooth_w,u_shading.y+smooth_w,ndl); float toon_l=mix(0.32,1.0,toon_edge); float continuous_l=0.25+0.75*ndl; float l=mix(continuous_l,toon_l,step(0.5,u_shading.x)); float metallic=clamp(u_material.x,0.0,1.0); float roughness=clamp(u_material.y,0.04,1.0); vec3 h=normalize(light+vec3(0.0,0.0,1.0)); float spec=pow(max(dot(n,h),0.0),mix(128.0,2.0,roughness))*ndl; vec3 f0=mix(vec3(0.04),base.rgb,metallic); out_color=vec4(base.rgb*l*(1.0-metallic*0.45)+f0*spec,base.a); }")
 
 (defn init-mesh-viewport!
   "Initialize the canonical arbitrary-mesh WebGL2 fallback for a canvas."
@@ -91,25 +106,42 @@ void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6))
   (when-let [gl (webgl2-context canvas)]
     (let [width (max 1 (.-clientWidth canvas)) height (max 1 (.-clientHeight canvas))
           prog (program gl mesh-vertex-shader mesh-fragment-shader)
-          instance-buffer (.createBuffer gl)]
+          instance-buffer (.createBuffer gl)
+          white-texture (.createTexture gl)]
       (set! (.-width canvas) width) (set! (.-height canvas) height)
       (.enable gl (.-DEPTH_TEST gl))
+      (.bindTexture gl (.-TEXTURE_2D gl) white-texture)
+      (.texImage2D gl (.-TEXTURE_2D gl) 0 (.-RGBA gl) 1 1 0 (.-RGBA gl)
+                   (.-UNSIGNED_BYTE gl) (js/Uint8Array. #js [255 255 255 255]))
+      ;; WebGL's default TEXTURE_MIN_FILTER requires a complete mip chain.
+      ;; This fallback texture intentionally has only level 0; without an
+      ;; explicit non-mipmap filter every untextured draw fails with
+      ;; GL_INVALID_OPERATION at drawElementsInstanced (the whole VRM frame
+      ;; disappeared even though fetch/parse/upload reported ready).
+      (.texParameteri gl (.-TEXTURE_2D gl) (.-TEXTURE_MIN_FILTER gl) (.-LINEAR gl))
+      (.texParameteri gl (.-TEXTURE_2D gl) (.-TEXTURE_MAG_FILTER gl) (.-LINEAR gl))
       {:backend :webgl2 :gl gl :program prog :instance-buffer instance-buffer
-       :width width :height height})))
+       :white-texture white-texture :width width :height height})))
 
 (defn upload-mesh!
   "Upload {:positions :normals :indices} to a fallback viewport."
-  [{:keys [gl]} {:keys [positions normals indices joints weights] :as geometry}]
+  [{:keys [gl]} {:keys [positions normals uvs indices joints weights] :as geometry}]
   (let [vao (.createVertexArray gl) vertex-buffer (.createBuffer gl) index-buffer (.createBuffer gl)
         instance-buffer (.createBuffer gl)
-        vertices (js/Float32Array. (clj->js (mapcat concat (map vector positions normals))))
+        uvs (if (seq uvs) uvs (repeat (count positions) [0.0 0.0]))
+        ;; One vertex is eight scalar floats. `mapcat concat (map vector ...)`
+        ;; leaves p/n/uv as three nested arrays; Float32Array coerces each array
+        ;; to NaN and allocates only 12 bytes per vertex. The VAO advertises a
+        ;; 32-byte stride, so WebGL correctly rejects every indexed draw.
+        vertices (js/Float32Array.
+                  (clj->js (interleave-mesh-vertices positions normals uvs)))
         index-data (js/Uint32Array. (clj->js indices))]
     (.bindVertexArray gl vao)
     (.bindBuffer gl (.-ARRAY_BUFFER gl) vertex-buffer)
     (.bufferData gl (.-ARRAY_BUFFER gl) vertices (.-STATIC_DRAW gl))
-    (doseq [[location offset] [[0 0] [1 12]]]
+    (doseq [[location size offset] [[0 3 0] [1 3 12] [7 2 24]]]
       (.enableVertexAttribArray gl location)
-      (.vertexAttribPointer gl location 3 (.-FLOAT gl) false 24 offset))
+      (.vertexAttribPointer gl location size (.-FLOAT gl) false 32 offset))
     (.bindBuffer gl (.-ELEMENT_ARRAY_BUFFER gl) index-buffer)
     (.bufferData gl (.-ELEMENT_ARRAY_BUFFER gl) index-data (.-STATIC_DRAW gl))
     (.bindBuffer gl (.-ARRAY_BUFFER gl) instance-buffer)
@@ -120,19 +152,38 @@ void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6))
     (.bindVertexArray gl nil)
     {:vao vao :vertex-buffer vertex-buffer :index-buffer index-buffer :instance-buffer instance-buffer
      :instance-cache (atom nil) :index-count (count indices)
-     :geometry geometry :positions positions :normals normals :joints joints :weights weights}))
+     :geometry geometry :positions positions :normals normals :uvs uvs :joints joints :weights weights}))
+
+(defn upload-texture!
+  "Decode an embedded VRM image and upload it as a WebGL2 texture."
+  [{:keys [gl]} {:keys [bytes mime-type]}]
+  (-> (js/createImageBitmap
+       (js/Blob. #js [(js/Uint8Array. (clj->js (vec bytes)))] #js {:type mime-type}))
+      (.then (fn [bitmap]
+               (let [texture (.createTexture gl)]
+                 (.bindTexture gl (.-TEXTURE_2D gl) texture)
+                 (.pixelStorei gl (.-UNPACK_FLIP_Y_WEBGL gl) true)
+                 (.texImage2D gl (.-TEXTURE_2D gl) 0 (.-RGBA gl)
+                              (.-RGBA gl) (.-UNSIGNED_BYTE gl) bitmap)
+                 (.texParameteri gl (.-TEXTURE_2D gl) (.-TEXTURE_MIN_FILTER gl) (.-LINEAR_MIPMAP_LINEAR gl))
+                 (.texParameteri gl (.-TEXTURE_2D gl) (.-TEXTURE_MAG_FILTER gl) (.-LINEAR gl))
+                 (.generateMipmap gl (.-TEXTURE_2D gl))
+                 texture)))))
 
 (defn render-mesh-scene!
   "Render fallback meshes with one instanced call per shared geometry. Each
   draw is {:buffers :mvp :color}; MVP is a column-major Float32Array."
-  [{:keys [gl program width height]} draws]
+  [{:keys [gl program white-texture width height]} draws]
   (.viewport gl 0 0 width height)
   (.clearColor gl 0.035 0.055 0.10 1.0)
   (.clear gl (bit-or (.-COLOR_BUFFER_BIT gl) (.-DEPTH_BUFFER_BIT gl)))
   (.useProgram gl program)
-  (.uniform2f gl (.getUniformLocation gl program "u_material") 0.0 0.5)
+  (.uniform1i gl (.getUniformLocation gl program "u_base_color") 0)
   (doseq [[_ group] (group-by :buffers draws)]
     (let [{:keys [buffers]} (first group) {:keys [vao index-count instance-buffer instance-cache]} buffers
+          material (:material (first group))
+          [uv-x uv-y] (or (:uv-offset material) [0.0 0.0])
+          [uv-sx uv-sy] (or (:uv-scale material) [1.0 1.0])
           cached @instance-cache
           cache-hit? (= group (:draws cached))
           packed (if cache-hit? (:packed cached)
@@ -140,7 +191,18 @@ void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6))
                     (clj->js (mapcat (fn [{:keys [mvp color]}]
                                        (concat (array-seq mvp) color [1.0])) group))))]
       (when-not cache-hit? (reset! instance-cache {:draws group :packed packed}))
+      (.uniform2f gl (.getUniformLocation gl program "u_material")
+                  (or (:metallic material) 0.0) (or (:roughness material) 0.5))
+      (.uniform3f gl (.getUniformLocation gl program "u_shading")
+                  (or (:shade-kind material) 0.0)
+                  (or (:toon-threshold material) 0.4)
+                  (or (:toon-smooth material) 0.08))
+      (.uniform2f gl (.getUniformLocation gl program "u_uv_offset") uv-x uv-y)
+      (.uniform2f gl (.getUniformLocation gl program "u_uv_scale") uv-sx uv-sy)
       (.bindBuffer gl (.-ARRAY_BUFFER gl) instance-buffer)
+      (.activeTexture gl (.-TEXTURE0 gl))
+      (.bindTexture gl (.-TEXTURE_2D gl)
+                    (or (get-in (first group) [:material :texture]) white-texture))
       (when-not cache-hit? (.bufferData gl (.-ARRAY_BUFFER gl) packed (.-DYNAMIC_DRAW gl)))
       (.bindVertexArray gl vao)
       (.drawElementsInstanced gl (.-TRIANGLES gl) index-count (.-UNSIGNED_INT gl) 0 (count group))))
@@ -167,10 +229,38 @@ void main(){ vec3 n=normalize(v_normal); vec3 light=normalize(vec3(0.4,0.8,0.6))
                        [0 0 0] (map vector joint-ids joint-weights)))
         skinned-positions (mapv skin positions joints weights (repeat false))
         skinned-normals (mapv skin normals joints weights (repeat true))
-        vertices (js/Float32Array. (clj->js (mapcat concat (map vector skinned-positions skinned-normals))))]
+        vertices (js/Float32Array.
+                  (clj->js (interleave-mesh-vertices
+                            skinned-positions skinned-normals (:uvs buffers))))]
     (.bindBuffer gl (.-ARRAY_BUFFER gl) vertex-buffer)
     (.bufferSubData gl (.-ARRAY_BUFFER gl) 0 vertices)
     (render-mesh-scene! viewport [{:buffers buffers :mvp mvp :color color}])))
+
+(defn skin-mesh!
+  "CPU-skin one uploaded mesh and return its buffers for a shared scene pass."
+  [{:keys [gl]} {:keys [positions normals joints weights vertex-buffer] :as buffers} joint-matrices]
+  (let [skin (fn [value joint-ids joint-weights direction?]
+               (reduce (fn [result [joint weight]]
+                         (mapv + result (mapv #(* weight %) (transform-joint (nth joint-matrices joint) value direction?))))
+                       [0 0 0] (map vector joint-ids joint-weights)))
+        vertices (js/Float32Array.
+                  (clj->js (interleave-mesh-vertices
+                            (mapv skin positions joints weights (repeat false))
+                            (mapv skin normals joints weights (repeat true))
+                            (:uvs buffers))))]
+    (.bindBuffer gl (.-ARRAY_BUFFER gl) vertex-buffer)
+    (.bufferSubData gl (.-ARRAY_BUFFER gl) 0 vertices)
+    buffers))
+
+(defn render-skinned-mesh-scene! [viewport draws]
+  (render-mesh-scene! viewport
+    (mapv (fn [{:keys [buffers joint-matrices] :as draw}]
+            (assoc draw :buffers
+                   (if (and (seq (:joints buffers)) (seq (:weights buffers))
+                            (seq joint-matrices))
+                     (skin-mesh! viewport buffers joint-matrices)
+                     buffers)))
+          draws)))
 
 ;; ── 2D sprite pass: instanced SDF quads (the GPU-2D path, identical output to WebGPU) ───────────
 ;; instance layout = kami.sprite-gpu/pack-instances: 12 floats — ipos(2) isize(2) irot(1) ishape(1)
