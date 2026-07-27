@@ -3,8 +3,10 @@
 {:paths ["src"]
  :deps {org.clojure/clojure {:mvn/version "1.11.1"}
         org.clojure/clojurescript {:mvn/version "1.11.132"}
-        io.github.kotoba-lang/gpu {:local/root "../gpu"}
-        io.github.kotoba-lang/sprite-gpu {:local/root "../sprite-gpu"}}
+        io.github.kotoba-lang/gpu {:git/url "https://github.com/kotoba-lang/gpu.git"
+         :git/sha "03b9fdf854a8e63f53326ef8c78b22c845256b7e"}
+        io.github.kotoba-lang/sprite-gpu {:git/url "https://github.com/kotoba-lang/sprite-gpu.git"
+         :git/sha "77fca743519c109344114fe2d308076dd323830b"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
