@@ -19,5 +19,5 @@ See ADR-2607102200 addendum 6.
 ## Test
 
 ```sh
-clojure -M:test
+kbb -M:test
 ```
