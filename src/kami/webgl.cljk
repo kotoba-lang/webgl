@@ -2,7 +2,7 @@
   "kami-webgl — a WebGL2 renderer driven by the SAME EDN as kami.webgpu, for browsers without
    WebGPU. It consumes the same render-IR (globals + instances) and the same render-graph (resolved
    through kami.gpu for the :webgl2 tier, which drops compute passes), running the GLSL ES 3.00
-   shaders that `bb gen-glsl` transpiles from the one EDN shader (kami.wgsl → naga → GLSL).
+   shaders that `kbb -M:gen-glsl` transpiles from the one EDN shader (kami.wgsl → naga → GLSL).
 
    The naga GLSL convention this binds to: per-instance vertex inputs at `layout(location=0..)`,
    uniforms in a std140 block, the full-quad corners from gl_VertexID. So `(pick-backend)` selects
