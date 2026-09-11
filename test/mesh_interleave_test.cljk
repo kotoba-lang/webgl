@@ -1,6 +1,6 @@
 (ns mesh-interleave-test
   "Kaizen (net-babiniku co-scientist round 67): regression coverage for a real bug found in
-   `kami.webgl/upload-mesh!` (src/kami/webgl.cljc) -- the vertex-interleaving expression itself
+   `kami.webgl/upload-mesh!` (src/kami/webgl.cljk) -- the vertex-interleaving expression itself
    is pure data transformation (no browser API), so it's directly testable here on the JVM even
    though the surrounding namespace is `#?(:cljs ...)`-gated and can't be required directly.
 
